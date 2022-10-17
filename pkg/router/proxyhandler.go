@@ -12,6 +12,8 @@ import (
 	"k8s.io/apimachinery/pkg/util/proxy"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/transport"
+
+	"github.com/fengxsong/vmdashboard/pkg/endpoints/request"
 )
 
 const (
@@ -71,6 +73,7 @@ func NewProxyHandler(apiProxyPrefix string, cfg *rest.Config, keepalive time.Dur
 	if err != nil {
 		return nil, err
 	}
+	transport = &wrappedRoundTripper{transport, true}
 	upgradeTransport, err := makeUpgradeTransport(cfg, keepalive)
 	if err != nil {
 		return nil, err
@@ -83,4 +86,35 @@ func NewProxyHandler(apiProxyPrefix string, cfg *rest.Config, keepalive time.Dur
 	proxyServer := http.Handler(proxy)
 
 	return proxyServer, nil
+}
+
+type wrappedRoundTripper struct {
+	inner       http.RoundTripper
+	impersonate bool
+}
+
+func (rt *wrappedRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	if !rt.impersonate {
+		return rt.inner.RoundTrip(req)
+	}
+	user, ok := request.UserFrom(req.Context())
+	if !ok || user == nil || len(req.Header.Get(transport.ImpersonateUserHeader)) != 0 {
+		return rt.inner.RoundTrip(req)
+	}
+	req = utilnet.CloneRequest(req)
+	if username := user.GetName(); username != "" {
+		req.Header.Set(transport.ImpersonateUserHeader, user.GetName())
+	}
+	if uid := user.GetUID(); uid != "" {
+		req.Header.Set(transport.ImpersonateUIDHeader, uid)
+	}
+	for _, group := range user.GetGroups() {
+		req.Header.Add(transport.ImpersonateGroupHeader, group)
+	}
+	for k, vv := range user.GetExtra() {
+		for _, v := range vv {
+			req.Header.Add(transport.ImpersonateUserExtraHeaderPrefix+http.CanonicalHeaderKey(k), v)
+		}
+	}
+	return rt.inner.RoundTrip(req)
 }
